@@ -1,0 +1,11 @@
+# Local version backups
+backup/
+
+# Local user settings (if stored alongside script)
+*.ini
+
+# Windows & editor artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
