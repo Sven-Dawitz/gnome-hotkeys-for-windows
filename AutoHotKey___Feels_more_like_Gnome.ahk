@@ -3,24 +3,54 @@
 
 ; ==============================================================================
 ; 🚀 SCRIPT: WorkspacesSwitching-WIN-LINUX.ahk
-; 📌 VERSION: v1.6.2 (Final - Bugfix: Start Menu Recursion Flicker)
+; 📌 VERSION: v2.1.3 (Final - Double-Tap & Full Deskflow/Gnome Integration)
 ; ==============================================================================
-; 📖 MINI HELP:
-; This script enhances Windows 11 to behave more like Linux/Gnome:
-; 1. Normalizes workspace switching (Ctrl+Alt+Left/Right -> Ctrl+Win+Left/Right)
-;    for tools like Deskflow. Implements a State Machine for fluid continuous
-;    switching while holding the modifiers.
-; 2. Overrides the Windows (Super) key:
-;    - Short tap: Opens Task View (Workspace Overview) instantly
-;    - Hold + Key: Acts as a normal modifier
-; 3. Task View Search (Gnome-Style):
-;    - Typing in Task View instantly redirects to the native Windows Start Menu
-;    - Includes keystroke buffering for fast typing without timeouts
+; 📖 ARCHITECTURE & PHILOSOPHY:
+;
+; This script bridges the UX gap in a heterogeneous multi-OS environment
+; (Arch Linux <-> Windows 11 <-> Debian) operated seamlessly via Deskflow. 
+; Because the primary Linux workstations rely on Gnome (Wayland), this script 
+; forces Windows 11 to adopt Gnome's core navigation paradigms. The goal is 
+; zero friction and unified muscle memory across all operating systems.
+;
+; 🌟 CORE FEATURES & MECHANICS:
+;
+; 1. Fluid Workspace Switching (Ctrl+Alt+Left/Right)
+;    - Concept: Remaps standard shortcuts to bypass Deskflow's interception 
+;      limitations regarding Windows 11's native desktop switching.
+;    - Engine: Utilizes a non-blocking State Machine (`IsWorkspaceSwitching`) 
+;      with a 50ms polling loop. This guarantees clean modifier release 
+;      (Alt/Win) and prevents the notorious "stuck key" bug when transitioning 
+;      input focus across machine boundaries.
+;
+; 2. The "Gnome Start" Emulation (Super Key Interception)
+;    - Concept: Replicates Gnome's "Activities" overview. Windows 11 strictly 
+;      separates its Task View from the Start Menu search, breaking the fluid
+;      "Super -> Type" workflow. This script fuses them back together.
+;    - Behavior: 
+;      * Single Tap [Super]: Opens Task View immediately.
+;      * Typing [A-Z, 0-9] in Task View: Instantly intercepts the input, kills 
+;        the Task View, triggers the native Start Menu, and dumps all typed 
+;        characters from a high-speed buffer into the search field.
+;    - Technical Detail: To avoid recursive infinite loops, the interceptor 
+;      is strictly bound to `explorer.exe`, differentiating the Task View from 
+;      the visually identical XAML containers used by `SearchHost.exe`.
+;
+; 3. Direct Start Menu Fallback (Double-Tap Super)
+;    - Concept: A rapid double-tap (within 400ms) on the Super key bypasses 
+;      the Task View entirely, forcing the native Windows Start Menu to open 
+;      for immediate, non-buffered access.
+;
+; 4. Hardcoded DevTool Exceptions
+;    - Concept: Ensures that critical applications like IDEs (VS Code, JetBrains), 
+;      VMs (VMware, VirtualBox), and RDP sessions retain full capture of native 
+;      keystrokes, disabling workspace hooks when these windows are active.
 ; ==============================================================================
 
 Global IsWorkspaceSwitching := false
 Global SearchTransitionActive := false
 Global SearchBuffer := ""
+Global LastLWinPress := 0
 
 InstallKeybdHook()
 InstallMouseHook()
@@ -28,8 +58,7 @@ InstallMouseHook()
 ; ==============================================================================
 ; TASK VIEW SEARCH HOTKEYS (Gnome-like Typing)
 ; ==============================================================================
-; BUGFIX: Strikt auf explorer.exe begrenzt, damit das Startmenü (SearchHost.exe)
-; nicht versehentlich als Task View erkannt wird und in einen Loop rennt!
+; Bound strictly to explorer.exe to avoid recursive triggering in Start Menu
 GroupAdd("TaskViewGroup", "ahk_class XamlExplorerHostIslandWindow ahk_exe explorer.exe")
 GroupAdd("TaskViewGroup", "ahk_class Windows.UI.Core.CoreWindow ahk_exe explorer.exe")
 
@@ -91,21 +120,35 @@ CheckAltRelease() {
 }
 
 ; ==============================================================================
-; WINDOWS KEY MODIFICATION (Active Proxy Method - Tap Only)
+; WINDOWS KEY MODIFICATION (Tap / Double-Tap / Proxy)
 ; ==============================================================================
 *LWin:: {
+    Global LastLWinPress
+    TimeSinceLastPress := A_TickCount - LastLWinPress
+    LastLWinPress := A_TickCount
+
     Send("{Blind}{LWin down}")
     KeyWait("LWin") ; Wait indefinitely until the physical key is released
     
     if (A_PriorKey = "LWin") {
-        Send("{Blind}{Tab}{LWin up}") 
+        if (TimeSinceLastPress > 0 and TimeSinceLastPress < 400) {
+            ; --- DOUBLE TAP: Direct Start Menu ---
+            Send("{Blind}{LWin up}")
+            Send("{Esc}")       ; Gracefully close the Task View from the first tap
+            Sleep(50)           ; Micro-delay for UI state flush
+            Send("^{Esc}")      ; Force native Start Menu open
+        } else {
+            ; --- SINGLE TAP: Open Task View ---
+            Send("{Blind}{Tab}{LWin up}") 
+        }
     } else {
+        ; --- MODIFIER USAGE (e.g., Win+E) ---
         Send("{Blind}{LWin up}")
     }
 }
 
 ; ==============================================================================
-; HELPER FUNCTIONS
+; HELPER FUNCTIONS (Search Interception & Buffering)
 ; ==============================================================================
 TriggerSearch(ThisHotkey) {
     Global SearchTransitionActive, SearchBuffer
@@ -118,22 +161,22 @@ TriggerSearch(ThisHotkey) {
     SearchTransitionActive := true
     SearchBuffer := ThisHotkey
     
-    ; 1. Task View abbrechen
+    ; 1. Kill Task View
     Send("{Esc}")       
     
-    ; 2. WICHTIG: Task View wird oft nicht zerstört, verliert nur den Fokus! 
+    ; 2. Wait until Task View loses focus (WinWaitNotActive avoids destroying timeout)
     WinWaitNotActive("ahk_group TaskViewGroup", , 1)
     
-    ; 3. Startmenü nativ öffnen
+    ; 3. Open native Start Menu
     Send("^{Esc}")        
     
-    ; 4. Ein kurzer UI-Sleep ist robuster als das Warten auf flüchtige Exe-Prozesse
+    ; 4. UI-Sleep for search host allocation
     Sleep(150) 
     
-    ; 5. Den gesammelten Text abschicken
+    ; 5. Flush buffered text
     Send(SearchBuffer)
     
-    ; 6. Lock nach Abschluss etwas flotter freigeben
+    ; 6. Release lock quickly
     SetTimer(ResetSearchState, -300)
 }
 
