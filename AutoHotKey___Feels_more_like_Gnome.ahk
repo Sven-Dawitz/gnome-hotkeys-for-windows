@@ -2,58 +2,44 @@
 #SingleInstance Force
 
 ; ==============================================================================
-; 🚀 SCRIPT: WorkspacesSwitching-WIN-LINUX.ahk
-; 📌 VERSION: v2.1.3 (Final - Double-Tap & Full Deskflow/Gnome Integration)
+; SCRIPT: AutoHotKey___Feels_more_like_Gnome.ahk (WorkspacesSwitching-WIN-LINUX)
+; VERSION: v2.2.0 (Non-Blocking Hooks, Deskflow-Safe Modifiers & Fast SendEvent)
 ; ==============================================================================
-; 📖 ARCHITECTURE & PHILOSOPHY:
-;
-; This script bridges the UX gap in a heterogeneous multi-OS environment
-; (Arch Linux <-> Windows 11 <-> Debian) operated seamlessly via Deskflow. 
-; Because the primary Linux workstations rely on Gnome (Wayland), this script 
-; forces Windows 11 to adopt Gnome's core navigation paradigms. The goal is 
-; zero friction and unified muscle memory across all operating systems.
-;
-; 🌟 CORE FEATURES & MECHANICS:
-;
-; 1. Fluid Workspace Switching (Ctrl+Alt+Left/Right)
-;    - Concept: Remaps standard shortcuts to bypass Deskflow's interception 
-;      limitations regarding Windows 11's native desktop switching.
-;    - Engine: Utilizes a non-blocking State Machine (`IsWorkspaceSwitching`) 
-;      with a 50ms polling loop. This guarantees clean modifier release 
-;      (Alt/Win) and prevents the notorious "stuck key" bug when transitioning 
-;      input focus across machine boundaries.
-;
-; 2. The "Gnome Start" Emulation (Super Key Interception)
-;    - Concept: Replicates Gnome's "Activities" overview. Windows 11 strictly 
-;      separates its Task View from the Start Menu search, breaking the fluid
-;      "Super -> Type" workflow. This script fuses them back together.
-;    - Behavior: 
-;      * Single Tap [Super]: Opens Task View immediately.
-;      * Typing [A-Z, 0-9] in Task View: Instantly intercepts the input, kills 
-;        the Task View, triggers the native Start Menu, and dumps all typed 
-;        characters from a high-speed buffer into the search field.
-;    - Technical Detail: To avoid recursive infinite loops, the interceptor 
-;      is strictly bound to `explorer.exe`, differentiating the Task View from 
-;      the visually identical XAML containers used by `SearchHost.exe`.
-;
-; 3. Direct Start Menu Fallback (Double-Tap Super)
-;    - Concept: A rapid double-tap (within 400ms) on the Super key bypasses 
-;      the Task View entirely, forcing the native Windows Start Menu to open 
-;      for immediate, non-buffered access.
-;
-; 4. Hardcoded DevTool Exceptions
-;    - Concept: Ensures that critical applications like IDEs (VS Code, JetBrains), 
-;      VMs (VMware, VirtualBox), and RDP sessions retain full capture of native 
-;      keystrokes, disabling workspace hooks when these windows are active.
+; ARCHITECTURE:
+; 1. Hook & Send Stability:
+;    - Uses SendMode("Event") with SetKeyDelay(-1, -1) so Send never uninstalls/
+;      reinstalls the low-level keyboard hook or falls back to 10ms-per-key delays.
+;    - Sets A_MenuMaskKey to unassigned vkE8 to avoid phantom Ctrl masking.
+;    - Keeps only the keyboard hook (no mouse hook overhead or A_PriorKey noise).
+; 2. Fluid Workspace Switching (Ctrl+Alt+Left/Right -> Ctrl+Win+Left/Right):
+;    - Uses hook-evaluated HotIfWinNotActive("ahk_group DevTools") and immediate
+;      passthrough modifier-up hotkeys plus a logical-Ctrl safety timer so both
+;      local hardware and Deskflow-injected modifiers release cleanly.
+; 3. Gnome-Style Super Key (LWin Tap / Double-Tap / Modifier Proxy):
+;    - Non-blocking *LWin / *LWin up state tracking (no KeyWait stall):
+;      * Single tap: opens Task View (Win+Tab).
+;      * Double tap (<400ms): closes Task View and opens native Start Menu.
+;      * Hold + key: passes through as a normal Win modifier.
+; 4. Task View Search Redirection:
+;    - Typing [a-z, 0-9] in Task View buffers keystrokes asynchronously via timer
+;      and flushes them literally via SendText into the native Start Menu.
 ; ==============================================================================
+
+SendMode("Event")
+SetKeyDelay(-1, -1)
+A_MenuMaskKey := "vkE8"
+try ProcessSetPriority("High")
+#HotIfTimeout 200
+
+InstallKeybdHook()
 
 Global IsWorkspaceSwitching := false
 Global SearchTransitionActive := false
 Global SearchBuffer := ""
-Global LastLWinPress := 0
-
-InstallKeybdHook()
-InstallMouseHook()
+Global LWinDown := false
+Global LWinWasSolo := false
+Global LWinCanDoubleTap := false
+Global LastLWinTap := 0
 
 ; ==============================================================================
 ; TASK VIEW SEARCH HOTKEYS (Gnome-like Typing)
@@ -76,7 +62,7 @@ Loop 10 {
 HotIfWinActive()
 
 ; ==============================================================================
-; WORKSPACE SWITCH HOTKEYS (State Machine Method)
+; WORKSPACE SWITCH HOTKEYS (Non-Blocking State Machine + Immediate Release)
 ; ==============================================================================
 exeList := [
     "idea64.exe",       ; JetBrains
@@ -84,62 +70,99 @@ exeList := [
     "Code.exe",         ; VS Code
     "mstsc.exe",        ; Windows Remote Desktop
     "vmware.exe",       ; VMware Workstation/Player
-    "VirtualBoxVM.exe"  ; VirtualBox 
+    "VirtualBoxVM.exe"  ; VirtualBox
 ]
 
 for _, exe in exeList {
     GroupAdd("DevTools", "ahk_exe " exe)
 }
 
-#HotIf !WinActive("ahk_group DevTools")
+HotIfWinNotActive("ahk_group DevTools")
+Hotkey("^!Left", (*) => HandleWorkspaceSwitch("Left"))
+Hotkey("^!Right", (*) => HandleWorkspaceSwitch("Right"))
+HotIfWinNotActive()
 
-^!Left::HandleWorkspaceSwitch("Left")
-^!Right::HandleWorkspaceSwitch("Right")
-
-#HotIf ; Reset
+; Immediate release when any Ctrl/Alt side is released (works for local & Deskflow)
+~*LAlt up::EndWorkspaceSwitch()
+~*RAlt up::EndWorkspaceSwitch()
+~*LCtrl up::EndWorkspaceSwitch()
+~*RCtrl up::EndWorkspaceSwitch()
 
 HandleWorkspaceSwitch(Direction) {
     Global IsWorkspaceSwitching
-    
+
     if (!IsWorkspaceSwitching) {
         IsWorkspaceSwitching := true
-        Send("{Blind}{Alt up}{LWin down}")
-        SetTimer(CheckAltRelease, 50)
+        altUp := (GetKeyState("LAlt") ? "{LAlt up}" : "") . (GetKeyState("RAlt") ? "{RAlt up}" : "")
+        Send("{Blind}{vkE8}" altUp "{LWin down}{" Direction "}")
+        SetTimer(CheckWorkspaceRelease, 50)
+    } else {
+        Send("{Blind}{" Direction "}")
     }
-    Send("{Blind}{" Direction "}")
 }
 
-CheckAltRelease() {
+EndWorkspaceSwitch(*) {
     Global IsWorkspaceSwitching
-    
-    if !GetKeyState("Alt", "P") {
-        SetTimer(CheckAltRelease, 0)
-        Send("{Blind}{LWin up}")
-        IsWorkspaceSwitching := false
+
+    if (!IsWorkspaceSwitching) {
+        return
+    }
+    IsWorkspaceSwitching := false
+    SetTimer(CheckWorkspaceRelease, 0)
+    Send("{Blind}{vkE8}{LWin up}")
+}
+
+CheckWorkspaceRelease() {
+    Global IsWorkspaceSwitching
+
+    if (!IsWorkspaceSwitching) {
+        SetTimer(CheckWorkspaceRelease, 0)
+        return
+    }
+    ; Check logical Ctrl state (without "P") so Deskflow-injected modifiers work reliably
+    if (!GetKeyState("Ctrl")) {
+        EndWorkspaceSwitch()
     }
 }
 
 ; ==============================================================================
-; WINDOWS KEY MODIFICATION (Tap / Double-Tap / Proxy)
+; WINDOWS KEY MODIFICATION (Non-Blocking Tap / Double-Tap / Proxy)
 ; ==============================================================================
 *LWin:: {
-    Global LastLWinPress
-    TimeSinceLastPress := A_TickCount - LastLWinPress
-    LastLWinPress := A_TickCount
+    Global LWinDown, LWinWasSolo, LWinCanDoubleTap
 
+    ; Ignore OS auto-repeat while held, but recover after Win+L lock screen
+    if (LWinDown && GetKeyState("LWin")) {
+        return
+    }
+
+    LWinDown := true
+    LWinWasSolo := !(GetKeyState("Ctrl") || GetKeyState("Alt") || GetKeyState("Shift"))
+    LWinCanDoubleTap := (A_PriorKey = "LWin")
     Send("{Blind}{LWin down}")
-    KeyWait("LWin") ; Wait indefinitely until the physical key is released
-    
-    if (A_PriorKey = "LWin") {
-        if (TimeSinceLastPress > 0 and TimeSinceLastPress < 400) {
+}
+
+*LWin up:: {
+    Global LWinDown, LWinWasSolo, LWinCanDoubleTap, LastLWinTap
+
+    wasDown := LWinDown
+    wasSolo := LWinWasSolo
+    canDoubleTap := LWinCanDoubleTap
+    LWinDown := false
+    LWinWasSolo := false
+    LWinCanDoubleTap := false
+
+    if (wasDown && wasSolo && A_PriorKey = "LWin") {
+        now := A_TickCount
+        if (canDoubleTap && LastLWinTap > 0 && (now - LastLWinTap) < 400) {
             ; --- DOUBLE TAP: Direct Start Menu ---
-            Send("{Blind}{LWin up}")
-            Send("{Esc}")       ; Gracefully close the Task View from the first tap
-            Sleep(50)           ; Micro-delay for UI state flush
-            Send("^{Esc}")      ; Force native Start Menu open
+            LastLWinTap := 0
+            Send("{Blind}{vkE8}{LWin up}")
+            SetTimer(OpenStartMenuAfterTaskView, -1)
         } else {
             ; --- SINGLE TAP: Open Task View ---
-            Send("{Blind}{Tab}{LWin up}") 
+            LastLWinTap := now
+            Send("{Blind}{Tab}{LWin up}")
         }
     } else {
         ; --- MODIFIER USAGE (e.g., Win+E) ---
@@ -147,40 +170,67 @@ CheckAltRelease() {
     }
 }
 
+OpenStartMenuAfterTaskView() {
+    if (WinActive("ahk_group TaskViewGroup")) {
+        Send("{Esc}")
+        WinWaitNotActive("ahk_group TaskViewGroup", , 0.5)
+    } else {
+        Send("{Esc}")
+        Sleep(50)
+    }
+    Send("^{Esc}")
+}
+
 ; ==============================================================================
-; HELPER FUNCTIONS (Search Interception & Buffering)
+; HELPER FUNCTIONS (Asynchronous Search Interception & Buffering)
 ; ==============================================================================
 TriggerSearch(ThisHotkey) {
-    Global SearchTransitionActive, SearchBuffer
-    
+    Global SearchTransitionActive, SearchBuffer, LastLWinTap
+
+    LastLWinTap := 0
     if (SearchTransitionActive) {
         SearchBuffer .= ThisHotkey
         return
     }
-    
+
     SearchTransitionActive := true
     SearchBuffer := ThisHotkey
-    
+    SetTimer(DoSearchTransition, -1)
+}
+
+DoSearchTransition() {
+    Global SearchBuffer
+
     ; 1. Kill Task View
-    Send("{Esc}")       
-    
-    ; 2. Wait until Task View loses focus (WinWaitNotActive avoids destroying timeout)
-    WinWaitNotActive("ahk_group TaskViewGroup", , 1)
-    
+    Send("{Esc}")
+
+    ; 2. Wait until Task View loses focus
+    WinWaitNotActive("ahk_group TaskViewGroup", , 0.8)
+
     ; 3. Open native Start Menu
-    Send("^{Esc}")        
-    
+    Send("^{Esc}")
+
     ; 4. UI-Sleep for search host allocation
-    Sleep(150) 
-    
-    ; 5. Flush buffered text
-    Send(SearchBuffer)
-    
-    ; 6. Release lock quickly
-    SetTimer(ResetSearchState, -300)
+    Sleep(150)
+
+    ; 5. Flush buffered text literally
+    buf := SearchBuffer
+    SearchBuffer := ""
+    if (buf != "") {
+        SendText(buf)
+    }
+
+    ; 6. Drain any trailing keystrokes and release lock
+    SetTimer(ResetSearchState, -250)
 }
 
 ResetSearchState() {
-    Global SearchTransitionActive := false
-    Global SearchBuffer := ""
+    Global SearchTransitionActive, SearchBuffer
+
+    buf := SearchBuffer
+    SearchBuffer := ""
+    if (buf != "") {
+        SendText(buf)
+    }
+    SearchTransitionActive := false
 }
