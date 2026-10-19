@@ -3,37 +3,50 @@
 
 ; ==============================================================================
 ; SCRIPT: AutoHotKey___Feels_more_like_Gnome.ahk (WorkspacesSwitching-WIN-LINUX)
-; VERSION: v2.2.0 (Non-Blocking Hooks, Deskflow-Safe Modifiers & Fast SendEvent)
+; VERSION: v2.5.0
 ; ==============================================================================
-; ARCHITECTURE:
-; 1. Hook & Send Stability:
-;    - Uses SendMode("Event") with SetKeyDelay(-1, -1) so Send never uninstalls/
-;      reinstalls the low-level keyboard hook or falls back to 10ms-per-key delays.
-;    - Sets A_MenuMaskKey to unassigned vkE8 to avoid phantom Ctrl masking.
-;    - Keeps only the keyboard hook (no mouse hook overhead or A_PriorKey noise).
-; 2. Fluid Workspace Switching (Ctrl+Alt+Left/Right -> Ctrl+Win+Left/Right):
-;    - Uses hook-evaluated HotIfWinNotActive("ahk_group DevTools") and immediate
-;      passthrough modifier-up hotkeys plus a logical-Ctrl safety timer so both
-;      local hardware and Deskflow-injected modifiers release cleanly.
-; 3. Gnome-Style Super Key (LWin Tap / Double-Tap / Modifier Proxy):
-;    - Non-blocking *LWin / *LWin up state tracking (no KeyWait stall):
-;      * Single tap: opens Task View (Win+Tab).
-;      * Double tap (<400ms): closes Task View and opens native Start Menu.
-;      * Hold + key: passes through as a normal Win modifier.
-; 4. Task View Search Redirection:
-;    - Typing [a-z, 0-9] in Task View buffers keystrokes asynchronously via timer
-;      and flushes them literally via SendText into the native Start Menu.
+; CHANGELOG:
+; - v2.5.0 (2026-10-19):
+;   * Added Anti-Cheat Auto-Exit Guard (Anforderung I): checks on startup
+;     (before hook installation) and polls every 1000ms passively via
+;     ProcessExist() for Steam, Battle.net, Star Citizen (RSI Launcher / Client),
+;     and Easy Anti-Cheat; safely releases LWin if held and exits silently
+;     (ExitApp(0)) with no dialog so no AHK process or keyboard hook remains.
+;   * Added Direct Workspace Switching 1..7 (Anforderung II): binds Left Ctrl +
+;     Left Alt + 1..7 (<^<!1..7, preserving German AltGr+2/3/7) using pure
+;     AHK v2 Registry lookup (HKCU\...\VirtualDesktops) and non-blocking stepped
+;     navigation (WORKSPACE_JUMP_STEP_DELAY_MS := 30) with zero external DLLs.
+;   * Refined TaskViewGroup to Windows 11 XamlExplorerHostIslandWindow only
+;     (removed legacy Windows.UI.Core.CoreWindow to avoid shell flyout matches).
+;   * Replaced always-active ~*Ctrl/Alt up release hotkeys with dynamic On/Off
+;     toggling (SetWorkspaceReleaseHotkeys) only while IsWorkspaceSwitching.
+;   * Lowered ProcessSetPriority from "High" to "AboveNormal".
+; - v2.2.0 (2026-10-12):
+;   * Switched to SendMode("Event") + SetKeyDelay(-1, -1) and A_MenuMaskKey
+;     := "vkE8" to avoid SendInput hook churn/fallback lag and phantom Ctrl.
+;   * Removed unused InstallMouseHook() (eliminates mouse lag & A_PriorKey
+;     pollution from clicks/scrolls).
+;   * Replaced synchronous #HotIf !WinActive(...) with hook-evaluated
+;     HotIfWinNotActive(), replaced blocking KeyWait("LWin") with *LWin /
+;     *LWin up state tracking, added logical Ctrl release tracking for
+;     Deskflow compatibility, and made Task View search buffering asynchronous.
+; - v2.1.3 (2026-05-18):
+;   * Baseline script with Ctrl+Alt+Left/Right workspace switching, single/
+;     double-tap LWin Task View / Start Menu proxy, Task View typing redirect,
+;     and DevTools/VM exclusions.
 ; ==============================================================================
 
 SendMode("Event")
 SetKeyDelay(-1, -1)
 A_MenuMaskKey := "vkE8"
-try ProcessSetPriority("High")
+try ProcessSetPriority("AboveNormal")
 #HotIfTimeout 200
 
-InstallKeybdHook()
-
 Global IsWorkspaceSwitching := false
+Global IsWorkspaceJumping := false
+Global JumpCurrentDesktop := 1
+Global JumpTargetDesktop := 1
+Global WORKSPACE_JUMP_STEP_DELAY_MS := 30
 Global SearchTransitionActive := false
 Global SearchBuffer := ""
 Global LWinDown := false
@@ -41,12 +54,45 @@ Global LWinWasSolo := false
 Global LWinCanDoubleTap := false
 Global LastLWinTap := 0
 
+Global AntiCheatGuardExes := [
+    "steam.exe",
+    "Battle.net.exe",
+    "RSI Launcher.exe",
+    "StarCitizen_Launcher.exe",
+    "StarCitizen.exe",
+    "EasyAntiCheat_EOS.exe",
+    "EasyAntiCheat.exe"
+]
+
+; Check immediately before installing keyboard hook or registering hotkeys
+CheckAntiCheatGuard()
+SetTimer(CheckAntiCheatGuard, 1000)
+
+InstallKeybdHook()
+
+; ==============================================================================
+; ANTI-CHEAT AUTO-EXIT GUARD
+; ==============================================================================
+CheckAntiCheatGuard() {
+    Global AntiCheatGuardExes, IsWorkspaceSwitching, IsWorkspaceJumping, LWinDown
+
+    for _, exe in AntiCheatGuardExes {
+        if (ProcessExist(exe)) {
+            SetTimer(RunWorkspaceJumpStep, 0)
+            SetTimer(CheckWorkspaceRelease, 0)
+            if (IsWorkspaceSwitching || IsWorkspaceJumping || LWinDown || GetKeyState("LWin")) {
+                Send("{Blind}{vkE8}{LWin up}")
+            }
+            ExitApp(0)
+        }
+    }
+}
+
 ; ==============================================================================
 ; TASK VIEW SEARCH HOTKEYS (Gnome-like Typing)
 ; ==============================================================================
-; Bound strictly to explorer.exe to avoid recursive triggering in Start Menu
+; Bound strictly to Windows 11 Task View XAML island under explorer.exe
 GroupAdd("TaskViewGroup", "ahk_class XamlExplorerHostIslandWindow ahk_exe explorer.exe")
-GroupAdd("TaskViewGroup", "ahk_class Windows.UI.Core.CoreWindow ahk_exe explorer.exe")
 
 HotIfWinActive("ahk_group TaskViewGroup")
 
@@ -62,7 +108,7 @@ Loop 10 {
 HotIfWinActive()
 
 ; ==============================================================================
-; WORKSPACE SWITCH HOTKEYS (Non-Blocking State Machine + Immediate Release)
+; WORKSPACE SWITCH HOTKEYS (Relative Left/Right + Direct 1..7 via Registry)
 ; ==============================================================================
 exeList := [
     "idea64.exe",       ; JetBrains
@@ -80,19 +126,38 @@ for _, exe in exeList {
 HotIfWinNotActive("ahk_group DevTools")
 Hotkey("^!Left", (*) => HandleWorkspaceSwitch("Left"))
 Hotkey("^!Right", (*) => HandleWorkspaceSwitch("Right"))
+
+; Direct jump 1..7 on Left Ctrl + Left Alt (keeps German AltGr+2/3/7 intact)
+Loop 7 {
+    Hotkey("<^<!" A_Index, SwitchToWorkspace.Bind(A_Index))
+}
 HotIfWinNotActive()
 
-; Immediate release when any Ctrl/Alt side is released (works for local & Deskflow)
-~*LAlt up::EndWorkspaceSwitch()
-~*RAlt up::EndWorkspaceSwitch()
-~*LCtrl up::EndWorkspaceSwitch()
-~*RCtrl up::EndWorkspaceSwitch()
+; Dynamic release hotkeys: enabled only while IsWorkspaceSwitching is active
+Hotkey("~*LAlt up", EndWorkspaceSwitch, "Off")
+Hotkey("~*RAlt up", EndWorkspaceSwitch, "Off")
+Hotkey("~*LCtrl up", EndWorkspaceSwitch, "Off")
+Hotkey("~*RCtrl up", EndWorkspaceSwitch, "Off")
+
+SetWorkspaceReleaseHotkeys(state) {
+    HotIf()
+    Hotkey("~*LAlt up", EndWorkspaceSwitch, state)
+    Hotkey("~*RAlt up", EndWorkspaceSwitch, state)
+    Hotkey("~*LCtrl up", EndWorkspaceSwitch, state)
+    Hotkey("~*RCtrl up", EndWorkspaceSwitch, state)
+}
 
 HandleWorkspaceSwitch(Direction) {
-    Global IsWorkspaceSwitching
+    Global IsWorkspaceSwitching, IsWorkspaceJumping
+
+    if (IsWorkspaceJumping) {
+        SetTimer(RunWorkspaceJumpStep, 0)
+        IsWorkspaceJumping := false
+    }
 
     if (!IsWorkspaceSwitching) {
         IsWorkspaceSwitching := true
+        SetWorkspaceReleaseHotkeys("On")
         altUp := (GetKeyState("LAlt") ? "{LAlt up}" : "") . (GetKeyState("RAlt") ? "{RAlt up}" : "")
         Send("{Blind}{vkE8}" altUp "{LWin down}{" Direction "}")
         SetTimer(CheckWorkspaceRelease, 50)
@@ -109,6 +174,7 @@ EndWorkspaceSwitch(*) {
     }
     IsWorkspaceSwitching := false
     SetTimer(CheckWorkspaceRelease, 0)
+    SetWorkspaceReleaseHotkeys("Off")
     Send("{Blind}{vkE8}{LWin up}")
 }
 
@@ -122,6 +188,100 @@ CheckWorkspaceRelease() {
     ; Check logical Ctrl state (without "P") so Deskflow-injected modifiers work reliably
     if (!GetKeyState("Ctrl")) {
         EndWorkspaceSwitch()
+    }
+}
+
+GetVirtualDesktopState() {
+    baseKey := "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops"
+    idsHex := RegRead(baseKey, "VirtualDesktopIDs", "")
+    if (idsHex = "" || Mod(StrLen(idsHex), 32) != 0) {
+        return { valid: false, current: 0, count: 0 }
+    }
+
+    desktopCount := StrLen(idsHex) // 32
+    curHex := RegRead(baseKey, "CurrentVirtualDesktop", "")
+
+    if (StrLen(curHex) != 32) {
+        sessionId := 0
+        if (DllCall("Kernel32\ProcessIdToSessionId", "UInt", ProcessExist(), "UInt*", &sessionId)) {
+            sessionKey := "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo\" sessionId "\VirtualDesktops"
+            curHex := RegRead(sessionKey, "CurrentVirtualDesktop", "")
+        }
+    }
+
+    if (curHex = "") {
+        return { valid: true, current: 1, count: desktopCount }
+    }
+    if (StrLen(curHex) != 32) {
+        return { valid: false, current: 0, count: desktopCount }
+    }
+
+    Loop desktopCount {
+        if (SubStr(idsHex, (A_Index - 1) * 32 + 1, 32) = curHex) {
+            return { valid: true, current: A_Index, count: desktopCount }
+        }
+    }
+
+    return { valid: false, current: 0, count: desktopCount }
+}
+
+SwitchToWorkspace(TargetIndex, *) {
+    Global IsWorkspaceSwitching, IsWorkspaceJumping, JumpCurrentDesktop, JumpTargetDesktop
+
+    if (IsWorkspaceSwitching) {
+        EndWorkspaceSwitch()
+    }
+
+    state := GetVirtualDesktopState()
+    if (!state.valid || TargetIndex < 1 || TargetIndex > state.count) {
+        return
+    }
+
+    if (IsWorkspaceJumping) {
+        JumpTargetDesktop := TargetIndex
+        return
+    }
+
+    if (state.current = TargetIndex) {
+        return
+    }
+
+    JumpCurrentDesktop := state.current
+    JumpTargetDesktop := TargetIndex
+    IsWorkspaceJumping := true
+    SetTimer(RunWorkspaceJumpStep, -1)
+}
+
+RunWorkspaceJumpStep() {
+    Global IsWorkspaceJumping, JumpCurrentDesktop, JumpTargetDesktop, WORKSPACE_JUMP_STEP_DELAY_MS
+
+    if (!IsWorkspaceJumping || JumpCurrentDesktop = JumpTargetDesktop) {
+        FinishWorkspaceJump()
+        return
+    }
+
+    dir := (JumpTargetDesktop > JumpCurrentDesktop) ? "Right" : "Left"
+    ctrlWasDown := GetKeyState("LCtrl") || GetKeyState("RCtrl")
+    altUp := (GetKeyState("LAlt") ? "{LAlt up}" : "") . (GetKeyState("RAlt") ? "{RAlt up}" : "")
+    prefix := "{Blind}" . (altUp != "" ? "{vkE8}" altUp : "") . (ctrlWasDown ? "" : "{LCtrl down}")
+    suffix := "{LWin up}" . (ctrlWasDown ? "" : "{LCtrl up}")
+
+    Send(prefix "{LWin down}{" dir "}" suffix)
+    JumpCurrentDesktop += (dir = "Right") ? 1 : -1
+
+    if (JumpCurrentDesktop = JumpTargetDesktop) {
+        FinishWorkspaceJump()
+    } else {
+        SetTimer(RunWorkspaceJumpStep, -WORKSPACE_JUMP_STEP_DELAY_MS)
+    }
+}
+
+FinishWorkspaceJump() {
+    Global IsWorkspaceJumping
+
+    IsWorkspaceJumping := false
+    if (GetKeyState("LWin")) {
+        Send("{Blind}{vkE8}{LWin up}")
     }
 }
 
