@@ -3,37 +3,80 @@
 
 ; ==============================================================================
 ; SCRIPT: AutoHotKey___Feels_more_like_Gnome.ahk (WorkspacesSwitching-WIN-LINUX)
-; VERSION: v2.5.0
+; VERSION: v2.5.1
 ; ==============================================================================
+; ZIEL & SETUP:
+; Dieses Skript bringt das gewohnte GNOME-Out-of-the-Box-Navigationsgefühl auf
+; Windows 11, damit über alle Betriebssysteme hinweg dieselbe Muscle Memory gilt.
+;
+; 3-Geräte-Setup über Deskflow (1x Tastatur & Maus für alle drei Systeme):
+;   [Links: Debian 13 Laptop] <-> [Mitte: Windows 11 (Tastatur-/Maus-Host)] <-> [Rechts: Arch Linux Laptop]
+; Hinweis zur Zwischenablage: Das Teilen der Zwischenablage läuft über
+; KDE Connect (bzw. das GNOME-Pendant GSConnect), da Clipboard-Sharing in
+; Deskflow nach den Wayland-Anpassungen noch nicht zuverlässig funktioniert.
+; Dieses Skript rührt die Zwischenablage (A_Clipboard) daher bewusst NIE an.
+;
+; FEATURES & HOTKEYS:
+; - <Win> (kurz tippen):
+;     Öffnet/schließt die Fenster-Übersicht (Windows „Task View“ / Win+Tab),
+;     analog zur GNOME-Activities-Übersicht.
+; - <Win> + direkt oder verzögert lostippen:
+;     Fängt alle getippten Zeichen lückenlos per unterdrückendem InputHook ab
+;     (inkl. Pre-Capture direkt nach <Win>, Umlauten ä/ö/ü/ß, Backspace-Korrektur
+;     und Abbruch per Esc), schließt die Fenster-Übersicht, öffnet das
+;     Startmenü (Strg+Esc / SearchHost.exe) und tippt den Puffer ohne Verlust
+;     ins Suchfeld – ohne die Zwischenablage anzufassen.
+; - <Win> (Doppeltippen < 400 ms):
+;     Öffnet direkt das native Windows-Startmenü.
+; - <Win> + Taste gedrückt halten (z. B. Win+E, Win+L, Win+Shift+S):
+;     Verhält sich wie die normale Windows-Modifier-Taste.
+; - Strg + Alt + Links / Rechts:
+;     Wechselt einen virtuellen Desktop nach links bzw. rechts (mit sauberem
+;     Modifier-Release für Deskflow-Clients/Host).
+; - Linke Strg + Linke Alt + 1..7:
+;     Springt direkt zu Workspace 1..7 via Windows-11-Registry (Zero-DLL).
+;     Bewusst auf Linke Strg + Linke Alt (<^<!) gebunden, damit deutsches
+;     AltGr+2 (²), AltGr+3 (³) und AltGr+7 ({) unverändert funktionieren.
+; - DevTools- & VM-Ausnahmen:
+;     In idea64.exe, pycharm64.exe, Code.exe, mstsc.exe, vmware.exe und
+;     VirtualBoxVM.exe bleiben alle Workspace-Hotkeys unangetastet.
+; - Anti-Cheat Auto-Exit Guard:
+;     Prüft beim Start (noch vor Hook-Installation) sowie alle 1000 ms passiv
+;     per ProcessExist() auf Steam, Battle.net, Star Citizen (RSI Launcher /
+;     Client) und Easy Anti-Cheat; gibt ggf. LWin frei und beendet sich
+;     lautlos (ExitApp(0)) ohne Popup, damit kein AHK-Prozess/Hook verbleibt.
+; - Hook- & Latenz-Optimierung:
+;     SendMode("Event") + SetKeyDelay(-1, -1) global, A_MenuMaskKey := "vkE8",
+;     kein Mouse-Hook, ProcessSetPriority("AboveNormal"), Hook-ausgewertetes
+;     HotIfWinNotActive() und dynamische Release-Hotkeys (nur aktiv beim Wechsel).
+;
 ; CHANGELOG:
+; - v2.5.1 (2026-10-26):
+;   * Fixed dropped characters when typing rapidly after <Win>: replaced the
+;     TaskViewGroup-only hotkey buffering with a continuous InputHook ("B I1 T2.5")
+;     featuring Pre-Capture right after opening the overview, zero-gap upgrade
+;     to Transition capture, Backspace/Esc support, and a 2-stage Start Menu
+;     (StartMenuExperienceHost.exe -> SearchHost.exe) flush using thread-local
+;     SetKeyDelay(10, 5) without touching the clipboard (KDE Connect safe).
+;   * Added German umlaut/ß hotkeys (ä, ö, ü, ß) to TaskViewGroup.
+;   * Added full German feature/hotkey overview and 3-device Deskflow +
+;     KDE Connect/GSConnect setup documentation to header.
 ; - v2.5.0 (2026-10-19):
-;   * Added Anti-Cheat Auto-Exit Guard (Anforderung I): checks on startup
-;     (before hook installation) and polls every 1000ms passively via
-;     ProcessExist() for Steam, Battle.net, Star Citizen (RSI Launcher / Client),
-;     and Easy Anti-Cheat; safely releases LWin if held and exits silently
-;     (ExitApp(0)) with no dialog so no AHK process or keyboard hook remains.
-;   * Added Direct Workspace Switching 1..7 (Anforderung II): binds Left Ctrl +
-;     Left Alt + 1..7 (<^<!1..7, preserving German AltGr+2/3/7) using pure
-;     AHK v2 Registry lookup (HKCU\...\VirtualDesktops) and non-blocking stepped
-;     navigation (WORKSPACE_JUMP_STEP_DELAY_MS := 30) with zero external DLLs.
-;   * Refined TaskViewGroup to Windows 11 XamlExplorerHostIslandWindow only
-;     (removed legacy Windows.UI.Core.CoreWindow to avoid shell flyout matches).
-;   * Replaced always-active ~*Ctrl/Alt up release hotkeys with dynamic On/Off
-;     toggling (SetWorkspaceReleaseHotkeys) only while IsWorkspaceSwitching.
+;   * Added Anti-Cheat Auto-Exit Guard (startup check + 1000ms ProcessExist()
+;     polling + silent ExitApp(0) for Steam, Battle.net, Star Citizen, EAC).
+;   * Added Direct Workspace Switching 1..7 via <^<!1..7 using pure AHK v2
+;     Registry lookup (HKCU\...\VirtualDesktops) and non-blocking 30ms steps.
+;   * Narrowed TaskViewGroup to Windows 11 XamlExplorerHostIslandWindow only.
+;   * Switched ~*Ctrl/Alt up release hotkeys to dynamic On/Off toggling.
 ;   * Lowered ProcessSetPriority from "High" to "AboveNormal".
 ; - v2.2.0 (2026-10-12):
-;   * Switched to SendMode("Event") + SetKeyDelay(-1, -1) and A_MenuMaskKey
-;     := "vkE8" to avoid SendInput hook churn/fallback lag and phantom Ctrl.
-;   * Removed unused InstallMouseHook() (eliminates mouse lag & A_PriorKey
-;     pollution from clicks/scrolls).
-;   * Replaced synchronous #HotIf !WinActive(...) with hook-evaluated
-;     HotIfWinNotActive(), replaced blocking KeyWait("LWin") with *LWin /
-;     *LWin up state tracking, added logical Ctrl release tracking for
-;     Deskflow compatibility, and made Task View search buffering asynchronous.
+;   * Switched to SendMode("Event") + SetKeyDelay(-1, -1) and vkE8 menu mask.
+;   * Removed unused InstallMouseHook() (eliminated mouse lag & A_PriorKey noise).
+;   * Replaced #HotIf with HotIfWinNotActive(), replaced KeyWait("LWin") with
+;     *LWin / *LWin up state tracking, and used logical Ctrl check for Deskflow.
 ; - v2.1.3 (2026-05-18):
-;   * Baseline script with Ctrl+Alt+Left/Right workspace switching, single/
-;     double-tap LWin Task View / Start Menu proxy, Task View typing redirect,
-;     and DevTools/VM exclusions.
+;   * Baseline script (workspace switch state machine, Super tap/double-tap,
+;     Task View search redirect, DevTools/VM exceptions).
 ; ==============================================================================
 
 SendMode("Event")
@@ -49,6 +92,10 @@ Global JumpTargetDesktop := 1
 Global WORKSPACE_JUMP_STEP_DELAY_MS := 30
 Global SearchTransitionActive := false
 Global SearchBuffer := ""
+Global SearchHook := ""
+Global SearchHookMode := "" ; "", "PreCapture", or "Transition"
+Global SearchAborted := false
+Global PreCaptureStartTick := 0
 Global LWinDown := false
 Global LWinWasSolo := false
 Global LWinCanDoubleTap := false
@@ -80,6 +127,7 @@ CheckAntiCheatGuard() {
         if (ProcessExist(exe)) {
             SetTimer(RunWorkspaceJumpStep, 0)
             SetTimer(CheckWorkspaceRelease, 0)
+            StopSearchHook()
             if (IsWorkspaceSwitching || IsWorkspaceJumping || LWinDown || GetKeyState("LWin")) {
                 Send("{Blind}{vkE8}{LWin up}")
             }
@@ -89,10 +137,12 @@ CheckAntiCheatGuard() {
 }
 
 ; ==============================================================================
-; TASK VIEW SEARCH HOTKEYS (Gnome-like Typing)
+; TASK VIEW & START MENU SEARCH GROUPS / HOTKEYS (Gnome-like Typing)
 ; ==============================================================================
 ; Bound strictly to Windows 11 Task View XAML island under explorer.exe
 GroupAdd("TaskViewGroup", "ahk_class XamlExplorerHostIslandWindow ahk_exe explorer.exe")
+GroupAdd("StartMenuGroup", "ahk_exe StartMenuExperienceHost.exe")
+GroupAdd("StartMenuGroup", "ahk_exe SearchHost.exe")
 
 HotIfWinActive("ahk_group TaskViewGroup")
 
@@ -103,6 +153,10 @@ Loop 26 {
 ; 0-9
 Loop 10 {
     Hotkey(String(A_Index - 1), TriggerSearch)
+}
+; German umlauts & Eszett
+for _, ch in ["ä", "ö", "ü", "ß"] {
+    try Hotkey(ch, TriggerSearch)
 }
 
 HotIfWinActive()
@@ -149,6 +203,8 @@ SetWorkspaceReleaseHotkeys(state) {
 
 HandleWorkspaceSwitch(Direction) {
     Global IsWorkspaceSwitching, IsWorkspaceJumping
+
+    CancelPreCapture()
 
     if (IsWorkspaceJumping) {
         SetTimer(RunWorkspaceJumpStep, 0)
@@ -228,6 +284,8 @@ GetVirtualDesktopState() {
 SwitchToWorkspace(TargetIndex, *) {
     Global IsWorkspaceSwitching, IsWorkspaceJumping, JumpCurrentDesktop, JumpTargetDesktop
 
+    CancelPreCapture()
+
     if (IsWorkspaceSwitching) {
         EndWorkspaceSwitch()
     }
@@ -296,6 +354,7 @@ FinishWorkspaceJump() {
         return
     }
 
+    CancelPreCapture()
     LWinDown := true
     LWinWasSolo := !(GetKeyState("Ctrl") || GetKeyState("Alt") || GetKeyState("Shift"))
     LWinCanDoubleTap := (A_PriorKey = "LWin")
@@ -317,12 +376,19 @@ FinishWorkspaceJump() {
         if (canDoubleTap && LastLWinTap > 0 && (now - LastLWinTap) < 400) {
             ; --- DOUBLE TAP: Direct Start Menu ---
             LastLWinTap := 0
+            StopSearchHook()
             Send("{Blind}{vkE8}{LWin up}")
             SetTimer(OpenStartMenuAfterTaskView, -1)
         } else {
-            ; --- SINGLE TAP: Open Task View ---
+            ; --- SINGLE TAP: Toggle Fenster-Übersicht (Task View) ---
             LastLWinTap := now
+            openingOverview := !WinActive("ahk_group TaskViewGroup")
             Send("{Blind}{Tab}{LWin up}")
+            if (openingOverview) {
+                StartPreCapture()
+            } else {
+                StopSearchHook()
+            }
         }
     } else {
         ; --- MODIFIER USAGE (e.g., Win+E) ---
@@ -342,8 +408,154 @@ OpenStartMenuAfterTaskView() {
 }
 
 ; ==============================================================================
-; HELPER FUNCTIONS (Asynchronous Search Interception & Buffering)
+; SEARCH CAPTURE & START MENU REDIRECT (Pre-Capture + 2-Stage InputHook)
 ; ==============================================================================
+StartPreCapture() {
+    Global SearchHook, SearchHookMode, SearchBuffer, SearchAborted, PreCaptureStartTick
+
+    StopSearchHook()
+    SearchBuffer := ""
+    SearchAborted := false
+    SearchHookMode := "PreCapture"
+    PreCaptureStartTick := A_TickCount
+
+    ih := InputHook("B I1 T2.5")
+    ih.VisibleText := false
+    ih.VisibleNonText := true
+    ih.NotifyNonText := true
+    ih.OnChar := OnSearchHookChar
+    ih.OnKeyDown := OnSearchHookKeyDown
+    ih.OnEnd := OnSearchHookEnd
+    SearchHook := ih
+    ih.Start()
+
+    SetTimer(ExpirePreCapture, 50)
+}
+
+CancelPreCapture() {
+    Global SearchHookMode
+
+    if (SearchHookMode = "PreCapture") {
+        StopSearchHook()
+    }
+}
+
+ExpirePreCapture() {
+    Global SearchHookMode, PreCaptureStartTick
+
+    if (SearchHookMode != "PreCapture") {
+        SetTimer(ExpirePreCapture, 0)
+        return
+    }
+    if (WinActive("ahk_group TaskViewGroup") || (A_TickCount - PreCaptureStartTick) >= 350) {
+        StopSearchHook()
+    }
+}
+
+StartTransitionCapture(InitialChar) {
+    Global SearchTransitionActive, SearchAborted, SearchBuffer, SearchHookMode, SearchHook
+
+    StopSearchHook()
+    SearchTransitionActive := true
+    SearchAborted := false
+    SearchBuffer := InitialChar
+    SearchHookMode := "Transition"
+
+    ih := InputHook("B I1 T2.5")
+    ih.VisibleText := false
+    ih.VisibleNonText := true
+    ih.NotifyNonText := true
+    ih.OnChar := OnSearchHookChar
+    ih.OnKeyDown := OnSearchHookKeyDown
+    ih.OnEnd := OnSearchHookEnd
+    ih.KeyOpt("{Backspace}{Enter}", "S")
+    SearchHook := ih
+    ih.Start()
+}
+
+StopSearchHook() {
+    Global SearchHook, SearchHookMode
+
+    SetTimer(ExpirePreCapture, 0)
+    ih := SearchHook
+    SearchHook := ""
+    SearchHookMode := ""
+    if (IsObject(ih) && ih.InProgress) {
+        ih.Stop()
+    }
+}
+
+OnSearchHookChar(ih, char) {
+    Global SearchHook, SearchHookMode, SearchTransitionActive, SearchAborted, SearchBuffer, LastLWinTap
+
+    if (ih != SearchHook) {
+        return
+    }
+
+    ; Ignore non-printable control chars and shortcut modifiers (keep AltGr = LCtrl+RAlt working)
+    hasShortcutMod := (GetKeyState("LCtrl") && !GetKeyState("RAlt")) || GetKeyState("RCtrl") || GetKeyState("LAlt") || GetKeyState("LWin") || GetKeyState("RWin")
+    if (Ord(char) < 32 || hasShortcutMod) {
+        return
+    }
+
+    if (SearchHookMode = "PreCapture") {
+        ; Do not start search on a stray leading space
+        if (Ord(char) = 32) {
+            return
+        }
+        ; Upgrade the running hook in-place to Transition mode with zero gap
+        SetTimer(ExpirePreCapture, 0)
+        LastLWinTap := 0
+        SearchHookMode := "Transition"
+        SearchTransitionActive := true
+        SearchAborted := false
+        SearchBuffer := char
+        ih.KeyOpt("{Backspace}{Enter}", "S")
+        SetTimer(DoSearchTransition, -1)
+    } else if (SearchHookMode = "Transition") {
+        SearchBuffer .= char
+    }
+}
+
+OnSearchHookKeyDown(ih, vk, sc) {
+    Global SearchHook, SearchHookMode, SearchAborted, SearchBuffer
+
+    if (ih != SearchHook) {
+        return
+    }
+
+    if (vk = 0x1B) { ; Escape
+        if (SearchHookMode = "Transition") {
+            SearchAborted := true
+        }
+        StopSearchHook()
+        return
+    }
+
+    if (SearchHookMode = "PreCapture") {
+        ; Cancel Pre-Capture on navigation/action keys (never on Shift!)
+        if (vk = 0x08 || vk = 0x09 || vk = 0x0D || (vk >= 0x25 && vk <= 0x28) || vk = 0x2E) {
+            StopSearchHook()
+        }
+    } else if (SearchHookMode = "Transition") {
+        if (vk = 0x08 && StrLen(SearchBuffer) > 0) { ; Backspace
+            SearchBuffer := SubStr(SearchBuffer, 1, -1)
+        }
+    }
+}
+
+OnSearchHookEnd(ih) {
+    Global SearchHook, SearchHookMode
+
+    if (ih != SearchHook) {
+        return
+    }
+    SetTimer(ExpirePreCapture, 0)
+    if (SearchHookMode = "PreCapture") {
+        SearchHookMode := ""
+    }
+}
+
 TriggerSearch(ThisHotkey) {
     Global SearchTransitionActive, SearchBuffer, LastLWinTap
 
@@ -353,44 +565,76 @@ TriggerSearch(ThisHotkey) {
         return
     }
 
-    SearchTransitionActive := true
-    SearchBuffer := ThisHotkey
+    StartTransitionCapture(ThisHotkey)
     SetTimer(DoSearchTransition, -1)
 }
 
 DoSearchTransition() {
-    Global SearchBuffer
+    Global SearchTransitionActive, SearchBuffer, SearchAborted
 
-    ; 1. Kill Task View
-    Send("{Esc}")
+    try {
+        ; 1. Wait briefly if Task View was just triggered via Pre-Capture
+        if (!WinActive("ahk_group TaskViewGroup")) {
+            WinWaitActive("ahk_group TaskViewGroup", , 0.25)
+        }
+        if (SearchAborted) {
+            return
+        }
 
-    ; 2. Wait until Task View loses focus
-    WinWaitNotActive("ahk_group TaskViewGroup", , 0.8)
+        ; 2. Close Fenster-Übersicht (Task View)
+        if (WinActive("ahk_group TaskViewGroup")) {
+            Send("{Esc}")
+            WinWaitNotActive("ahk_group TaskViewGroup", , 0.8)
+        }
+        if (SearchAborted) {
+            return
+        }
 
-    ; 3. Open native Start Menu
-    Send("^{Esc}")
+        ; 3. Open native Start Menu (Ctrl+Esc)
+        Send("^{Esc}")
+        WinWaitActive("ahk_group StartMenuGroup", , 1.0)
+        if (SearchAborted) {
+            return
+        }
+        Sleep(60)
+        if (SearchAborted) {
+            return
+        }
 
-    ; 4. UI-Sleep for search host allocation
-    Sleep(150)
+        ; 4. Stage 1 -> Stage 2 handoff (StartMenuExperienceHost -> SearchHost)
+        ; Thread-local SetKeyDelay avoids touching clipboard (KDE Connect / GSConnect safe)
+        SetKeyDelay(10, 5)
+        if (WinActive("ahk_exe StartMenuExperienceHost.exe") && StrLen(SearchBuffer) >= 1) {
+            Critical("On")
+            firstChar := SubStr(SearchBuffer, 1, 1)
+            SearchBuffer := SubStr(SearchBuffer, 2)
+            Critical("Off")
+            SendText(firstChar)
+            WinWaitActive("ahk_exe SearchHost.exe", , 0.8)
+            Sleep(60)
+        }
+        if (SearchAborted) {
+            return
+        }
 
-    ; 5. Flush buffered text literally
-    buf := SearchBuffer
-    SearchBuffer := ""
-    if (buf != "") {
-        SendText(buf)
+        ; 5. Flush remaining captured characters while keeping InputHook catching tail input
+        Loop 10 {
+            if (SearchAborted) {
+                break
+            }
+            Critical("On")
+            chunk := SearchBuffer
+            SearchBuffer := ""
+            Critical("Off")
+            if (chunk = "") {
+                break
+            }
+            SendText(chunk)
+        }
+    } finally {
+        StopSearchHook()
+        SearchBuffer := ""
+        SearchAborted := false
+        SearchTransitionActive := false
     }
-
-    ; 6. Drain any trailing keystrokes and release lock
-    SetTimer(ResetSearchState, -250)
-}
-
-ResetSearchState() {
-    Global SearchTransitionActive, SearchBuffer
-
-    buf := SearchBuffer
-    SearchBuffer := ""
-    if (buf != "") {
-        SendText(buf)
-    }
-    SearchTransitionActive := false
 }
