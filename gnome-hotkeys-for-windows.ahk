@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ; ==============================================================================
-; gnome-hotkeys-for-windows (v2.6.0)
+; gnome-hotkeys-for-windows (v2.6.1)
 ; Brings GNOME out-of-the-box keyboard navigation & workspace switching to Windows.
 ;
 ; Author:  Sven Dawitz
@@ -43,7 +43,7 @@ global AntiCheatGuards := [
 ]
 
 ; Fullscreen VMs / remote desktop viewers where ALL custom hotkeys (including Win,
-; workspace switching, and Ctrl+Alt+T) are disabled so the guest OS receives them
+; workspace switching, and Ctrl+Alt+T) are paused so the guest OS receives them
 ; natively.
 global ExcludedApps := [
     "vmware.exe",                ; VMware Workstation / Player
@@ -62,6 +62,9 @@ global WORKSPACE_JUMP_STEP_DELAY_MS := 30
 ; ==============================================================================
 ; RUNTIME SETTINGS & INTERNAL STATE
 ; ==============================================================================
+; Event mode + zero key delay avoids SendInput hook uninstall/reinstall churn
+; and 10 ms fallback delays; vkE8 prevents phantom Ctrl menu-mask events; only
+; the keyboard hook is installed (no mouse hook overhead or A_PriorKey noise).
 SendMode("Event")
 SetKeyDelay(-1, -1)
 A_MenuMaskKey := "vkE8"
@@ -83,15 +86,22 @@ global LWinWasSolo := false
 global LWinCanDoubleTap := false
 global LastLWinTap := 0
 
-; Run anti-cheat guard immediately before installing the keyboard hook or hotkeys
+; Run anti-cheat check immediately before installing the keyboard hook or hotkeys
 CheckAntiCheatGuard()
 SetTimer(CheckAntiCheatGuard, 1000)
 
 InstallKeybdHook()
 
 ; ==============================================================================
-; ANTI-CHEAT AUTO-EXIT GUARD
+; ANTI-CHEAT SAFETY
 ; ==============================================================================
+
+/**
+ * CheckAntiCheatGuard() - Exits silently if a listed game or anti-cheat runs.
+ *
+ * Uses passive ProcessExist() enumeration (never opens handles to target
+ * processes), releases LWin if currently held, and terminates via ExitApp(0).
+ */
 CheckAntiCheatGuard() {
     global AntiCheatGuards, IsWorkspaceSwitching, IsWorkspaceJumping, LWinDown
 
@@ -138,7 +148,7 @@ for _, ch in ["ä", "ö", "ü", "ß"] {
 HotIfWinActive()
 
 ; ==============================================================================
-; CUSTOM HOTKEYS (ALL DISABLED INSIDE ExcludedApps)
+; CUSTOM HOTKEYS (PAUSED INSIDE ExcludedApps)
 ; ==============================================================================
 HotIfWinNotActive("ahk_group ExcludedApps")
 
@@ -154,7 +164,7 @@ loop 7 {
 ; Open modern Windows Terminal (falls back to PowerShell if unavailable)
 Hotkey("^!t", OpenTerminal)
 
-; GNOME-like Super (LWin) overview / type-to-search / double-tap Start Menu
+; GNOME-like Win (LWin) overview / type-to-search / double-tap Start Menu
 Hotkey("*LWin", HandleLWinDown)
 
 HotIfWinNotActive()
@@ -169,6 +179,14 @@ Hotkey("*LWin up", HandleLWinUp, "Off")
 ; ==============================================================================
 ; TERMINAL LAUNCHER (Ctrl+Alt+T)
 ; ==============================================================================
+
+/**
+ * OpenTerminal() - Launches the modern Windows Terminal (Ctrl+Alt+T).
+ * @*: Ignored callback arguments passed by Hotkey().
+ *
+ * Cancels any armed search pre-capture and falls back to powershell.exe if
+ * wt.exe is unavailable.
+ */
 OpenTerminal(*) {
     CancelPreCapture()
     try {
@@ -181,6 +199,14 @@ OpenTerminal(*) {
 ; ==============================================================================
 ; WORKSPACE SWITCHING (Relative Left/Right + Direct 1..7 via Registry)
 ; ==============================================================================
+
+/**
+ * SetWorkspaceReleaseHotkeys() - Toggles global Ctrl/Alt release hotkeys.
+ * @state: Hotkey state ("On" or "Off").
+ *
+ * Dynamically armed only while relative workspace switching is active,
+ * avoiding both idle hook invocations and synchronous #HotIf evaluation.
+ */
 SetWorkspaceReleaseHotkeys(state) {
     HotIf()
     Hotkey("~*LAlt up", EndWorkspaceSwitch, state)
@@ -189,6 +215,13 @@ SetWorkspaceReleaseHotkeys(state) {
     Hotkey("~*RCtrl up", EndWorkspaceSwitch, state)
 }
 
+/**
+ * HandleWorkspaceSwitch() - Steps one virtual desktop left or right.
+ * @Direction: Step direction ("Left" or "Right").
+ *
+ * Converts Ctrl+Alt+Left/Right into a held LWin+Direction sequence on the
+ * first press, enabling dynamic release hotkeys and a 50 ms fallback timer.
+ */
 HandleWorkspaceSwitch(Direction) {
     global IsWorkspaceSwitching, IsWorkspaceJumping
 
@@ -210,6 +243,13 @@ HandleWorkspaceSwitch(Direction) {
     }
 }
 
+/**
+ * EndWorkspaceSwitch() - Ends an active relative workspace switch sequence.
+ * @*: Ignored callback arguments passed by Hotkey().
+ *
+ * Disables the dynamic release hotkeys, stops the fallback timer, and releases
+ * logical LWin with vkE8 menu masking.
+ */
 EndWorkspaceSwitch(*) {
     global IsWorkspaceSwitching
 
@@ -222,6 +262,12 @@ EndWorkspaceSwitch(*) {
     Send("{Blind}{vkE8}{LWin up}")
 }
 
+/**
+ * CheckWorkspaceRelease() - Safety timer releasing LWin if Ctrl was released.
+ *
+ * Polls logical Ctrl state instead of physical ("P") state so software-
+ * injected modifiers (such as Deskflow) release reliably.
+ */
 CheckWorkspaceRelease() {
     global IsWorkspaceSwitching
 
@@ -235,6 +281,15 @@ CheckWorkspaceRelease() {
     }
 }
 
+/**
+ * GetVirtualDesktopState() - Reads Windows virtual desktop order and index.
+ *
+ * Parses 16-byte GUIDs from HKCU\...\Explorer\VirtualDesktops (falling back
+ * to SessionInfo\<id> and Desktop 1 on fresh boot). Keeps the script 100%
+ * zero-DLL and avoids undocumented COM vtable hooks that break across updates.
+ *
+ * Return: Object { valid, current, count } with 1-based index, or valid: false.
+ */
 GetVirtualDesktopState() {
     baseKey := "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops"
     idsHex := RegRead(baseKey, "VirtualDesktopIDs", "")
@@ -270,6 +325,14 @@ GetVirtualDesktopState() {
     return { valid: false, current: 0, count: desktopCount }
 }
 
+/**
+ * SwitchToWorkspace() - Initiates or redirects a direct jump to Desktop 1..7.
+ * @TargetIndex: 1-based destination virtual desktop (1..7).
+ * @*:           Ignored callback arguments passed by Hotkey().
+ *
+ * Validates the target against Registry desktop state and schedules
+ * non-blocking stepped transitions via RunWorkspaceJumpStep().
+ */
 SwitchToWorkspace(TargetIndex, *) {
     global IsWorkspaceSwitching, IsWorkspaceJumping, JumpCurrentDesktop, JumpTargetDesktop
 
@@ -299,6 +362,13 @@ SwitchToWorkspace(TargetIndex, *) {
     SetTimer(RunWorkspaceJumpStep, -1)
 }
 
+/**
+ * RunWorkspaceJumpStep() - Sends one Ctrl+Win+Left/Right step toward target.
+ *
+ * Spaces steps by WORKSPACE_JUMP_STEP_DELAY_MS so Windows Explorer processes
+ * animations without dropping inputs and stays modifier-safe if Ctrl+Alt is
+ * released mid-jump.
+ */
 RunWorkspaceJumpStep() {
     global IsWorkspaceJumping, JumpCurrentDesktop, JumpTargetDesktop, WORKSPACE_JUMP_STEP_DELAY_MS
 
@@ -323,6 +393,11 @@ RunWorkspaceJumpStep() {
     }
 }
 
+/**
+ * FinishWorkspaceJump() - Completes a direct jump and clears jump state.
+ *
+ * Ensures logical LWin is released if still held when the target is reached.
+ */
 FinishWorkspaceJump() {
     global IsWorkspaceJumping
 
@@ -335,6 +410,14 @@ FinishWorkspaceJump() {
 ; ==============================================================================
 ; WINDOWS KEY MODIFICATION (Non-Blocking Tap / Double-Tap / Modifier Proxy)
 ; ==============================================================================
+
+/**
+ * HandleLWinDown() - Intercepts LWin press outside ExcludedApps.
+ * @*: Ignored callback arguments passed by Hotkey().
+ *
+ * Ignores OS auto-repeat while recovering after Win+L lock screens, tracks
+ * solo/double-tap eligibility, and dynamically enables *LWin up.
+ */
 HandleLWinDown(*) {
     global LWinDown, LWinWasSolo, LWinCanDoubleTap
 
@@ -353,6 +436,13 @@ HandleLWinDown(*) {
     Send("{Blind}{LWin down}")
 }
 
+/**
+ * HandleLWinUp() - Dispatches LWin release to Task View, Start Menu, or combo.
+ * @*: Ignored callback arguments passed by Hotkey().
+ *
+ * Disables *LWin up immediately and triggers Task View (single tap), native
+ * Start Menu (quick double-tap < 400 ms), or normal modifier release.
+ */
 HandleLWinUp(*) {
     global LWinDown, LWinWasSolo, LWinCanDoubleTap, LastLWinTap
 
@@ -395,6 +485,11 @@ HandleLWinUp(*) {
     }
 }
 
+/**
+ * OpenStartMenuAfterTaskView() - Closes Task View and opens the Start Menu.
+ *
+ * Scheduled asynchronously from HandleLWinUp() on a quick double-tap of Win.
+ */
 OpenStartMenuAfterTaskView() {
     if (WinActive("ahk_group TaskViewGroup")) {
         Send("{Esc}")
@@ -409,6 +504,13 @@ OpenStartMenuAfterTaskView() {
 ; ==============================================================================
 ; SEARCH CAPTURE & START MENU REDIRECT (Pre-Capture + 2-Stage InputHook)
 ; ==============================================================================
+
+/**
+ * StartPreCapture() - Arms a brief InputHook right after opening Task View.
+ *
+ * Uses InputHook("B I1 T2.5") to catch rapid typing before Task View finishes
+ * activating, ignoring our own SendLevel 0 output with a 2.5 s safety timeout.
+ */
 StartPreCapture() {
     global SearchHook, SearchHookMode, SearchBuffer, SearchAborted, PreCaptureStartTick
 
@@ -431,6 +533,11 @@ StartPreCapture() {
     SetTimer(ExpirePreCapture, 50)
 }
 
+/**
+ * CancelPreCapture() - Stops SearchHook only if currently in "PreCapture" mode.
+ *
+ * No-op when an active "Transition" search capture is already in progress.
+ */
 CancelPreCapture() {
     global SearchHookMode
 
@@ -439,6 +546,12 @@ CancelPreCapture() {
     }
 }
 
+/**
+ * ExpirePreCapture() - Ends "PreCapture" once Task View is active or timed out.
+ *
+ * Hands character interception off to TaskViewGroup hotkeys once Task View
+ * gains focus, or expires after 350 ms if the user does not start typing.
+ */
 ExpirePreCapture() {
     global SearchHookMode, PreCaptureStartTick
 
@@ -451,6 +564,13 @@ ExpirePreCapture() {
     }
 }
 
+/**
+ * StartTransitionCapture() - Buffers typing while switching to Start Menu.
+ * @InitialChar: First character typed inside Task View that triggered search.
+ *
+ * Suppresses text, Backspace, and Enter via InputHook("B I1 T2.5") so nothing
+ * leaks into the previous window during the Task View -> Start Menu hand-off.
+ */
 StartTransitionCapture(InitialChar) {
     global SearchTransitionActive, SearchAborted, SearchBuffer, SearchHookMode, SearchHook
 
@@ -472,6 +592,9 @@ StartTransitionCapture(InitialChar) {
     ih.Start()
 }
 
+/**
+ * StopSearchHook() - Terminates any active search InputHook and clears state.
+ */
 StopSearchHook() {
     global SearchHook, SearchHookMode
 
@@ -484,6 +607,14 @@ StopSearchHook() {
     }
 }
 
+/**
+ * OnSearchHookChar() - Collects printable characters during search capture.
+ * @ih:   InputHook instance that fired the callback.
+ * @char: Single Unicode character produced by the keypress.
+ *
+ * Ignores control characters and shortcut modifiers (while preserving AltGr)
+ * and upgrades "PreCapture" in-place to "Transition" on the first non-space.
+ */
 OnSearchHookChar(ih, char) {
     global SearchHook, SearchHookMode, SearchTransitionActive, SearchAborted, SearchBuffer, LastLWinTap
 
@@ -517,6 +648,15 @@ OnSearchHookChar(ih, char) {
     }
 }
 
+/**
+ * OnSearchHookKeyDown() - Handles non-text control keys during search capture.
+ * @ih: InputHook instance that fired the callback.
+ * @vk: Virtual-key code of the pressed key.
+ * @sc: Hardware scan code of the pressed key.
+ *
+ * Aborts or cancels on Escape, drops "PreCapture" on navigation/action keys
+ * (never on Shift), and deletes buffered characters on Backspace in Transition.
+ */
 OnSearchHookKeyDown(ih, vk, sc) {
     global SearchHook, SearchHookMode, SearchAborted, SearchBuffer
 
@@ -544,6 +684,10 @@ OnSearchHookKeyDown(ih, vk, sc) {
     }
 }
 
+/**
+ * OnSearchHookEnd() - Cleans up "PreCapture" state when InputHook terminates.
+ * @ih: InputHook instance that terminated.
+ */
 OnSearchHookEnd(ih) {
     global SearchHook, SearchHookMode
 
@@ -556,6 +700,13 @@ OnSearchHookEnd(ih) {
     }
 }
 
+/**
+ * TriggerSearch() - Hotkey entry point for typing inside Task View.
+ * @ThisHotkey: Character hotkey pressed while Task View was active.
+ *
+ * Starts Transition InputHook capture immediately and schedules
+ * DoSearchTransition() asynchronously.
+ */
 TriggerSearch(ThisHotkey) {
     global SearchTransitionActive, SearchBuffer, LastLWinTap
 
@@ -569,6 +720,13 @@ TriggerSearch(ThisHotkey) {
     SetTimer(DoSearchTransition, -1)
 }
 
+/**
+ * DoSearchTransition() - Transfers buffered search input into the Start Menu.
+ *
+ * Dismisses Task View, opens Start Menu (Ctrl+Esc), and performs a two-stage
+ * flush (StartMenuExperienceHost -> SearchHost) using thread-local
+ * SetKeyDelay(10, 5) and Critical buffer snapshots without touching A_Clipboard.
+ */
 DoSearchTransition() {
     global SearchTransitionActive, SearchBuffer, SearchAborted
 

@@ -2,7 +2,7 @@
 
 Bring GNOME's out-of-the-box keyboard navigation, virtual desktop switching, and instant type-to-search workflow to Windows 11.
 
-![Version](https://img.shields.io/badge/Version-v2.6.0-blue)
+![Version](https://img.shields.io/badge/Version-v2.6.1-blue)
 ![OS](https://img.shields.io/badge/OS-Windows%2011-0078D4?logo=windows11)
 ![AutoHotkey](https://img.shields.io/badge/AutoHotkey-v2.0.23%2B-334455)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
@@ -217,6 +217,10 @@ Planned improvements for upcoming releases (`v2.7.0` / `v2.8.0`):
 ---
 
 ## Changelog
+
+### v2.6.1 (2026-11-09)
+- Overhauled `README.md` for clarity and consistent terminology (`Hotkeys`, `Win`, `Anti-Cheat Safety`, `Settings`), clarified process-blacklist anti-cheat risks, simplified the `Virtual Desktop Switching` explanation, added a `TODO` roadmap, and refined hotkey/install instructions.
+- Standardized concise function-level documentation comments throughout `gnome-hotkeys-for-windows.ahk`.
 
 ### v2.6.0 (2026-11-02)
 - Renamed script to `gnome-hotkeys-for-windows.ahk`, extracted full documentation into `README.md`, added MIT `LICENSE`, and standardized all comments/identifiers to English.
