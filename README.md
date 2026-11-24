@@ -2,7 +2,7 @@
 
 Bring GNOME's out-of-the-box keyboard navigation, virtual desktop switching, and instant type-to-search workflow to Windows 11.
 
-![Version](https://img.shields.io/badge/Version-v2.6.1-blue)
+![Version](https://img.shields.io/badge/Version-v2.6.2-blue)
 ![OS](https://img.shields.io/badge/OS-Windows%2011-0078D4?logo=windows11)
 ![AutoHotkey](https://img.shields.io/badge/AutoHotkey-v2.0.23%2B-334455)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
@@ -72,7 +72,7 @@ While running, each AutoHotkey script shows a **green `H` icon** in your Windows
 | `Win` *(quick double-tap < 400 ms)* | Open the native Windows Start Menu directly (skips overview) |
 | `Win` + `<key>` *(hold)* | Normal Windows hotkeys (`Win+E`, `Win+L`, `Win+Shift+S`, etc.) |
 | `Ctrl` + `Alt` + `Left` / `Right` | Switch to the previous / next virtual desktop (hold to repeat) |
-| `Left Ctrl` + `Left Alt` + `1`..`7` | Jump directly to virtual desktop 1–7 *(multi-step; see [Virtual Desktop Switching](#virtual-desktop-switching))* |
+| `Left Ctrl` + `Left Alt` + `1`..`7` | Jump directly to virtual desktop 1–7 *(hold `Left Ctrl` + `Left Alt` to hop across multiple desktops; see [Virtual Desktop Switching](#virtual-desktop-switching))* |
 | `Ctrl` + `Alt` + `T` | Launch Windows Terminal (`wt.exe`; falls back to `powershell.exe`) |
 
 ---
@@ -92,11 +92,11 @@ While running, each AutoHotkey script shows a **green `H` icon** in your Windows
 ### Virtual Desktop Switching
 
 - **Relative (`Ctrl+Alt+Left` / `Right`):** Maps cleanly to Windows' native `Ctrl+Win+Left/Right` while keeping modifier state clean (no stuck `Alt` or `Win` keys, no accidental menu-bar focus).
-- **Direct (`Left Ctrl+Left Alt+1..7`):** Switches directly to your chosen virtual desktop (1–7) by stepping sequentially across the desktops until it reaches your target.
-  - **Why can't it jump instantaneously?** Unlike GNOME, Windows 11 provides neither native direct-jump hotkeys nor a public Virtual Desktop API, and does not allow remapping built-in workspace hotkeys. Because of these Windows limitations, stepping across desktops one by one with a tiny pause between steps is the only reliable approach without fragile system hacks. Since Windows animates each transition, jumping across several desktops (e.g., 5 → 1) takes a brief moment.
+- **Direct (`Left Ctrl+Left Alt+1..7`):** Switches directly to your chosen virtual desktop (1–7) by stepping sequentially until it reaches your target. You can keep `Left Ctrl` + `Left Alt` held down and press additional numbers in sequence—even mid-jump—to redirect immediately to another desktop without overshooting.
+  - **Why can't it jump instantaneously?** Unlike GNOME, Windows 11 provides neither native direct-jump hotkeys nor a public Virtual Desktop API, and does not allow remapping built-in workspace hotkeys. Because of these Windows limitations, stepping across desktops one by one while waiting for Windows to confirm each transition is the only reliable approach without fragile system hacks. Since Windows animates each transition, jumping across several desktops (e.g., 5 → 1) takes a brief moment.
 
 > [!TIP]
-> **Faster multi-desktop jumps (`Left Ctrl+Left Alt+1..7`):** Windows 11 plays a sliding transition animation on every workspace step. Turning off **Settings → Accessibility → Visual effects → Animation effects** makes multi-step jumps nearly instantaneous (and lets you lower `WORKSPACE_JUMP_STEP_DELAY_MS` to `15`).
+> **Faster multi-desktop jumps (`Left Ctrl+Left Alt+1..7`):** Windows 11 plays a sliding transition animation on every workspace step. Turning off **Settings → Accessibility → Visual effects → Animation effects** makes multi-step jumps nearly instantaneous—the script automatically adapts to the faster transition speed.
 
 - **Why only Left `Ctrl` and Left `Alt` (and not Right)?** Windows supports over 200 international keyboard layouts. To fit extra characters (such as `ä`, `ö`, `ü`, `{`, or `@` on German and other European layouts), many layouts treat the **Right** `Alt` key differently—commonly labeled **`AltGr`**, which Windows sends as `Left Ctrl + Right Alt`. To keep behavior identical across all keyboard layouts without interfering with `AltGr`, direct workspace jumps intentionally use only **Left** `Ctrl` and **Left** `Alt`, which behave identically on every keyboard layout.
 
@@ -201,7 +201,7 @@ All settings are at the top of `gnome-hotkeys-for-windows.ahk`:
 |---|---|
 | `AntiCheatGuards` | Launchers & anti-cheat processes that trigger an immediate silent exit (`ExitApp(0)`). |
 | `ExcludedApps` | VM / remote desktop executables where all hotkey processing is paused. |
-| `WORKSPACE_JUMP_STEP_DELAY_MS` | Delay in milliseconds between steps during `Left Ctrl+Left Alt+1..7` jumps (default: `30`). |
+| `WORKSPACE_JUMP_STEP_TIMEOUT_MS` | Max wait (ms) for Windows to confirm each desktop step before retrying once during `Left Ctrl+Left Alt+1..7` jumps (default: `500`). |
 
 ---
 
@@ -209,14 +209,19 @@ All settings are at the top of `gnome-hotkeys-for-windows.ahk`:
 
 Planned improvements for upcoming releases (`v2.7.0` / `v2.8.0`):
 
-- **Continuous direct workspace hopping (`Left Ctrl+Left Alt+1..7`):** Allow keeping `Left Ctrl` + `Left Alt` held down while pressing multiple number keys in sequence to quickly inspect several workspaces without releasing modifiers in between.
 - **Close all other AutoHotkey instances on anti-cheat detection (option, enabled by default):** When Anti-Cheat Safety triggers, also terminate other running `AutoHotkey64.exe` / `AutoHotkey32.exe` processes in case other user scripts do not implement their own anti-cheat check.
-- **Graphical Settings dialog (GUI + persistent `.ini`):** Edit `AntiCheatGuards`, `ExcludedApps`, and `WORKSPACE_JUMP_STEP_DELAY_MS` directly via a native GUI without modifying source code, accessible via hotkey and the system tray right-click menu.
+- **Graphical Settings dialog (GUI + persistent `.ini`):** Edit `AntiCheatGuards`, `ExcludedApps`, and `WORKSPACE_JUMP_STEP_TIMEOUT_MS` directly via a native GUI without modifying source code, accessible via hotkey and the system tray right-click menu.
 - **Offline-capable Help viewer:** Download and cache the version-matched `README.md` from GitHub on first use so documentation is available offline via hotkey and the system tray right-click menu (with automatic version refresh on script updates).
 
 ---
 
 ## Changelog
+
+### v2.6.2 (2026-11-24)
+- Rewrote direct workspace jumping (`Left Ctrl+Left Alt+1..7`) as a closed-loop state machine waiting for Windows Registry confirmation on each step (eliminates overshoot and desync on rapid/repeated presses and allows instant mid-jump redirection).
+- Added continuous direct workspace hopping: keep `Left Ctrl` + `Left Alt` held and press multiple numbers in sequence via dynamically toggled `<^1..7` continuation hotkeys and a unified `OnWorkspaceModifierUp()` handler.
+- Eliminated accidental `Win+Left/Right` window snapping during desktop jumps by holding synthetic `RCtrl` across each step.
+- Replaced `WORKSPACE_JUMP_STEP_DELAY_MS` with `WORKSPACE_JUMP_STEP_TIMEOUT_MS` (`500` ms default).
 
 ### v2.6.1 (2026-11-09)
 - Overhauled `README.md` for clarity and consistent terminology (`Hotkeys`, `Win`, `Anti-Cheat Safety`, `Settings`), clarified process-blacklist anti-cheat risks, simplified the `Virtual Desktop Switching` explanation, added a `TODO` roadmap, and refined hotkey/install instructions.

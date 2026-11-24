@@ -2,7 +2,7 @@
 #SingleInstance Force
 
 ; ==============================================================================
-; gnome-hotkeys-for-windows (v2.6.1)
+; gnome-hotkeys-for-windows (v2.6.2)
 ; Brings GNOME out-of-the-box keyboard navigation & workspace switching to Windows.
 ;
 ; Author:  Sven Dawitz
@@ -54,10 +54,9 @@ global ExcludedApps := [
     "mstsc.exe"                  ; Windows Remote Desktop (comment out if used windowed)
 ]
 
-; Delay (ms) between steps when jumping across multiple virtual desktops
-; (Left Ctrl + Left Alt + 1..7). Can be lowered (e.g. 15) if Windows animation
-; effects are disabled.
-global WORKSPACE_JUMP_STEP_DELAY_MS := 30
+; Maximum time (ms) to wait for Windows to confirm each virtual desktop step
+; in the Registry before retrying once (Left Ctrl + Left Alt + 1..7).
+global WORKSPACE_JUMP_STEP_TIMEOUT_MS := 500
 
 ; ==============================================================================
 ; RUNTIME SETTINGS & INTERNAL STATE
@@ -72,9 +71,14 @@ try ProcessSetPriority("AboveNormal")
 #HotIfTimeout 200
 
 global IsWorkspaceSwitching := false
+global IsDirectJumpHold := false
 global IsWorkspaceJumping := false
-global JumpCurrentDesktop := 1
 global JumpTargetDesktop := 1
+global JumpDesktopCount := 0
+global JumpAwaitingStep := false
+global JumpPrevGuid := ""
+global JumpStepSentTick := 0
+global JumpStepRetries := 0
 global SearchTransitionActive := false
 global SearchBuffer := ""
 global SearchHook := ""
@@ -107,7 +111,8 @@ CheckAntiCheatGuard() {
 
     for _, exe in AntiCheatGuards {
         if (ProcessExist(exe)) {
-            SetTimer(RunWorkspaceJumpStep, 0)
+            SetTimer(StepWorkspaceJump, 0)
+            SetTimer(PollWorkspaceJumpStep, 0)
             SetTimer(CheckWorkspaceRelease, 0)
             StopSearchHook()
             if (IsWorkspaceSwitching || IsWorkspaceJumping || LWinDown || GetKeyState("LWin")) {
@@ -169,11 +174,14 @@ Hotkey("*LWin", HandleLWinDown)
 
 HotIfWinNotActive()
 
-; Dynamic release hotkeys: enabled only while their corresponding hold is active
-Hotkey("~*LAlt up", EndWorkspaceSwitch, "Off")
-Hotkey("~*RAlt up", EndWorkspaceSwitch, "Off")
-Hotkey("~*LCtrl up", EndWorkspaceSwitch, "Off")
-Hotkey("~*RCtrl up", EndWorkspaceSwitch, "Off")
+; Dynamic release & continuation hotkeys: enabled only while their hold is active
+Hotkey("~*LAlt up", OnWorkspaceModifierUp, "Off")
+Hotkey("~*RAlt up", OnWorkspaceModifierUp, "Off")
+Hotkey("~*LCtrl up", OnWorkspaceModifierUp, "Off")
+Hotkey("~*RCtrl up", OnWorkspaceModifierUp, "Off")
+loop 7 {
+    Hotkey("<^" A_Index, SwitchToWorkspace.Bind(A_Index), "Off")
+}
 Hotkey("*LWin up", HandleLWinUp, "Off")
 
 ; ==============================================================================
@@ -201,18 +209,57 @@ OpenTerminal(*) {
 ; ==============================================================================
 
 /**
- * SetWorkspaceReleaseHotkeys() - Toggles global Ctrl/Alt release hotkeys.
- * @state: Hotkey state ("On" or "Off").
+ * UpdateWorkspaceModifierHotkeys() - Syncs dynamic modifier & jump hotkeys.
  *
- * Dynamically armed only while relative workspace switching is active,
- * avoiding both idle hook invocations and synchronous #HotIf evaluation.
+ * Keeps global Ctrl/Alt release hotkeys, temporary <^1..7 continuation
+ * hotkeys, and the 50 ms safety timer active only when needed, avoiding both
+ * idle hook overhead and synchronous #HotIf evaluation.
  */
-SetWorkspaceReleaseHotkeys(state) {
+UpdateWorkspaceModifierHotkeys() {
+    global IsWorkspaceSwitching, IsDirectJumpHold
+
+    needRelease := IsWorkspaceSwitching || IsDirectJumpHold
+    relState := needRelease ? "On" : "Off"
+    holdState := IsDirectJumpHold ? "On" : "Off"
+
     HotIf()
-    Hotkey("~*LAlt up", EndWorkspaceSwitch, state)
-    Hotkey("~*RAlt up", EndWorkspaceSwitch, state)
-    Hotkey("~*LCtrl up", EndWorkspaceSwitch, state)
-    Hotkey("~*RCtrl up", EndWorkspaceSwitch, state)
+    Hotkey("~*LAlt up", relState)
+    Hotkey("~*RAlt up", relState)
+    Hotkey("~*LCtrl up", relState)
+    Hotkey("~*RCtrl up", relState)
+    loop 7 {
+        Hotkey("<^" A_Index, holdState)
+    }
+
+    SetTimer(CheckWorkspaceRelease, needRelease ? 50 : 0)
+}
+
+/**
+ * OnWorkspaceModifierUp() - Handles Ctrl/Alt release for workspace modes.
+ * @*: Ignored callback arguments passed by Hotkey().
+ *
+ * Immediately ends relative switching and disables temporary <^1..7 hotkeys,
+ * while letting any active direct jump finish reaching JumpTargetDesktop.
+ */
+OnWorkspaceModifierUp(*) {
+    EndWorkspaceSwitch()
+    EndDirectJumpHold()
+}
+
+/**
+ * EndDirectJumpHold() - Disables temporary <^1..7 continuation hotkeys.
+ *
+ * Does not cancel an in-flight direct jump so releasing Ctrl+Alt early still
+ * completes the transition to JumpTargetDesktop.
+ */
+EndDirectJumpHold() {
+    global IsDirectJumpHold
+
+    if (!IsDirectJumpHold) {
+        return
+    }
+    IsDirectJumpHold := false
+    UpdateWorkspaceModifierHotkeys()
 }
 
 /**
@@ -226,18 +273,17 @@ HandleWorkspaceSwitch(Direction) {
     global IsWorkspaceSwitching, IsWorkspaceJumping
 
     CancelPreCapture()
+    EndDirectJumpHold()
 
     if (IsWorkspaceJumping) {
-        SetTimer(RunWorkspaceJumpStep, 0)
-        IsWorkspaceJumping := false
+        FinishWorkspaceJump()
     }
 
     if (!IsWorkspaceSwitching) {
         IsWorkspaceSwitching := true
-        SetWorkspaceReleaseHotkeys("On")
+        UpdateWorkspaceModifierHotkeys()
         altUp := (GetKeyState("LAlt") ? "{LAlt up}" : "") . (GetKeyState("RAlt") ? "{RAlt up}" : "")
         Send("{Blind}{vkE8}" altUp "{LWin down}{" Direction "}")
-        SetTimer(CheckWorkspaceRelease, 50)
     } else {
         Send("{Blind}{" Direction "}")
     }
@@ -247,8 +293,7 @@ HandleWorkspaceSwitch(Direction) {
  * EndWorkspaceSwitch() - Ends an active relative workspace switch sequence.
  * @*: Ignored callback arguments passed by Hotkey().
  *
- * Disables the dynamic release hotkeys, stops the fallback timer, and releases
- * logical LWin with vkE8 menu masking.
+ * Syncs dynamic release hotkeys and releases logical LWin with vkE8 masking.
  */
 EndWorkspaceSwitch(*) {
     global IsWorkspaceSwitching
@@ -257,27 +302,27 @@ EndWorkspaceSwitch(*) {
         return
     }
     IsWorkspaceSwitching := false
-    SetTimer(CheckWorkspaceRelease, 0)
-    SetWorkspaceReleaseHotkeys("Off")
+    UpdateWorkspaceModifierHotkeys()
     Send("{Blind}{vkE8}{LWin up}")
 }
 
 /**
- * CheckWorkspaceRelease() - Safety timer releasing LWin if Ctrl was released.
+ * CheckWorkspaceRelease() - Safety timer cleaning up held workspace modifiers.
  *
  * Polls logical Ctrl state instead of physical ("P") state so software-
  * injected modifiers (such as Deskflow) release reliably.
  */
 CheckWorkspaceRelease() {
-    global IsWorkspaceSwitching
+    global IsWorkspaceSwitching, IsDirectJumpHold
 
-    if (!IsWorkspaceSwitching) {
+    if (!IsWorkspaceSwitching && !IsDirectJumpHold) {
         SetTimer(CheckWorkspaceRelease, 0)
         return
     }
     ; Check logical Ctrl state (without "P") so software-injected modifiers work reliably
     if (!GetKeyState("Ctrl")) {
         EndWorkspaceSwitch()
+        EndDirectJumpHold()
     }
 }
 
@@ -288,13 +333,13 @@ CheckWorkspaceRelease() {
  * to SessionInfo\<id> and Desktop 1 on fresh boot). Keeps the script 100%
  * zero-DLL and avoids undocumented COM vtable hooks that break across updates.
  *
- * Return: Object { valid, current, count } with 1-based index, or valid: false.
+ * Return: Object { valid, current, count, guid } with 1-based index, or valid: false.
  */
 GetVirtualDesktopState() {
     baseKey := "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops"
     idsHex := RegRead(baseKey, "VirtualDesktopIDs", "")
     if (idsHex = "" || Mod(StrLen(idsHex), 32) != 0) {
-        return { valid: false, current: 0, count: 0 }
+        return { valid: false, current: 0, count: 0, guid: "" }
     }
 
     desktopCount := StrLen(idsHex) // 32
@@ -310,19 +355,19 @@ GetVirtualDesktopState() {
 
     ; Before the first switch after boot, CurrentVirtualDesktop may not exist yet -> Desktop 1
     if (curHex = "") {
-        return { valid: true, current: 1, count: desktopCount }
+        return { valid: true, current: 1, count: desktopCount, guid: SubStr(idsHex, 1, 32) }
     }
     if (StrLen(curHex) != 32) {
-        return { valid: false, current: 0, count: desktopCount }
+        return { valid: false, current: 0, count: desktopCount, guid: "" }
     }
 
     loop desktopCount {
         if (SubStr(idsHex, (A_Index - 1) * 32 + 1, 32) = curHex) {
-            return { valid: true, current: A_Index, count: desktopCount }
+            return { valid: true, current: A_Index, count: desktopCount, guid: curHex }
         }
     }
 
-    return { valid: false, current: 0, count: desktopCount }
+    return { valid: false, current: 0, count: desktopCount, guid: curHex }
 }
 
 /**
@@ -330,11 +375,13 @@ GetVirtualDesktopState() {
  * @TargetIndex: 1-based destination virtual desktop (1..7).
  * @*:           Ignored callback arguments passed by Hotkey().
  *
- * Validates the target against Registry desktop state and schedules
- * non-blocking stepped transitions via RunWorkspaceJumpStep().
+ * While a closed-loop jump is already running, updates JumpTargetDesktop in
+ * place without reading stale Registry state or queuing extra steps. Arms
+ * temporary <^1..7 hotkeys while Left Ctrl + Left Alt remain held.
  */
 SwitchToWorkspace(TargetIndex, *) {
-    global IsWorkspaceSwitching, IsWorkspaceJumping, JumpCurrentDesktop, JumpTargetDesktop
+    global IsWorkspaceSwitching, IsDirectJumpHold, IsWorkspaceJumping
+    global JumpTargetDesktop, JumpDesktopCount, JumpAwaitingStep, JumpStepRetries
 
     CancelPreCapture()
 
@@ -342,13 +389,22 @@ SwitchToWorkspace(TargetIndex, *) {
         EndWorkspaceSwitch()
     }
 
-    state := GetVirtualDesktopState()
-    if (!state.valid || TargetIndex < 1 || TargetIndex > state.count) {
+    ; Arm continuation hotkeys before sending {LAlt up}, unless LAlt was already released
+    if (!IsDirectJumpHold && GetKeyState("LCtrl") && GetKeyState("LAlt")) {
+        IsDirectJumpHold := true
+        UpdateWorkspaceModifierHotkeys()
+    }
+
+    ; Redirect an in-flight jump live without reading stale Registry state
+    if (IsWorkspaceJumping) {
+        if (TargetIndex >= 1 && TargetIndex <= JumpDesktopCount) {
+            JumpTargetDesktop := TargetIndex
+        }
         return
     }
 
-    if (IsWorkspaceJumping) {
-        JumpTargetDesktop := TargetIndex
+    state := GetVirtualDesktopState()
+    if (!state.valid || TargetIndex < 1 || TargetIndex > state.count) {
         return
     }
 
@@ -356,52 +412,102 @@ SwitchToWorkspace(TargetIndex, *) {
         return
     }
 
-    JumpCurrentDesktop := state.current
+    JumpDesktopCount := state.count
     JumpTargetDesktop := TargetIndex
+    JumpAwaitingStep := false
+    JumpStepRetries := 0
     IsWorkspaceJumping := true
-    SetTimer(RunWorkspaceJumpStep, -1)
+    SetTimer(StepWorkspaceJump, -1)
 }
 
 /**
- * RunWorkspaceJumpStep() - Sends one Ctrl+Win+Left/Right step toward target.
+ * StepWorkspaceJump() - Sends at most one Ctrl+Win+Left/Right step toward target.
  *
- * Spaces steps by WORKSPACE_JUMP_STEP_DELAY_MS so Windows Explorer processes
- * animations without dropping inputs and stays modifier-safe if Ctrl+Alt is
- * released mid-jump.
+ * Reads live Registry state before stepping, masks any held Alt, and holds
+ * synthetic RCtrl across {LWin down}{dir}{LWin up} so releasing physical LCtrl
+ * mid-step can never trigger Windows' Win+Left/Right window snapping.
  */
-RunWorkspaceJumpStep() {
-    global IsWorkspaceJumping, JumpCurrentDesktop, JumpTargetDesktop, WORKSPACE_JUMP_STEP_DELAY_MS
+StepWorkspaceJump() {
+    global IsWorkspaceJumping, JumpTargetDesktop, JumpDesktopCount
+    global JumpAwaitingStep, JumpPrevGuid, JumpStepSentTick
 
-    if (!IsWorkspaceJumping || JumpCurrentDesktop = JumpTargetDesktop) {
+    if (!IsWorkspaceJumping) {
+        return
+    }
+
+    state := GetVirtualDesktopState()
+    if (!state.valid || state.count < 1) {
         FinishWorkspaceJump()
         return
     }
 
-    dir := (JumpTargetDesktop > JumpCurrentDesktop) ? "Right" : "Left"
-    ctrlWasDown := GetKeyState("LCtrl") || GetKeyState("RCtrl")
-    altUp := (GetKeyState("LAlt") ? "{LAlt up}" : "") . (GetKeyState("RAlt") ? "{RAlt up}" : "")
-    prefix := "{Blind}" . (altUp != "" ? "{vkE8}" altUp : "") . (ctrlWasDown ? "" : "{LCtrl down}")
-    suffix := "{LWin up}" . (ctrlWasDown ? "" : "{LCtrl up}")
-
-    Send(prefix "{LWin down}{" dir "}" suffix)
-    JumpCurrentDesktop += (dir = "Right") ? 1 : -1
-
-    if (JumpCurrentDesktop = JumpTargetDesktop) {
+    JumpDesktopCount := state.count
+    if (JumpTargetDesktop < 1 || JumpTargetDesktop > state.count || state.current = JumpTargetDesktop) {
         FinishWorkspaceJump()
-    } else {
-        SetTimer(RunWorkspaceJumpStep, -WORKSPACE_JUMP_STEP_DELAY_MS)
+        return
+    }
+
+    dir := (JumpTargetDesktop > state.current) ? "Right" : "Left"
+    altUp := (GetKeyState("LAlt") ? "{LAlt up}" : "") . (GetKeyState("RAlt") ? "{RAlt up}" : "")
+    prefix := "{Blind}" . (altUp != "" ? "{vkE8}" altUp : "")
+
+    JumpPrevGuid := state.guid
+    JumpStepSentTick := A_TickCount
+    JumpAwaitingStep := true
+
+    ; Synthetic RCtrl guarantees Ctrl stays down even if user releases LCtrl mid-Send
+    Send(prefix "{RCtrl down}{LWin down}{" dir "}{LWin up}{RCtrl up}")
+    SetTimer(PollWorkspaceJumpStep, 15)
+}
+
+/**
+ * PollWorkspaceJumpStep() - Polls the Registry until the in-flight step commits.
+ *
+ * Runs every 15 ms while JumpAwaitingStep is true. Advances immediately once
+ * Windows updates CurrentVirtualDesktop; retries once on timeout before aborting.
+ */
+PollWorkspaceJumpStep() {
+    global IsWorkspaceJumping, JumpAwaitingStep, JumpPrevGuid
+    global JumpStepSentTick, JumpStepRetries, WORKSPACE_JUMP_STEP_TIMEOUT_MS
+
+    if (!IsWorkspaceJumping || !JumpAwaitingStep) {
+        SetTimer(PollWorkspaceJumpStep, 0)
+        return
+    }
+
+    state := GetVirtualDesktopState()
+    if (state.valid && state.guid != JumpPrevGuid) {
+        SetTimer(PollWorkspaceJumpStep, 0)
+        JumpAwaitingStep := false
+        JumpStepRetries := 0
+        SetTimer(StepWorkspaceJump, -1)
+        return
+    }
+
+    if ((A_TickCount - JumpStepSentTick) >= WORKSPACE_JUMP_STEP_TIMEOUT_MS) {
+        SetTimer(PollWorkspaceJumpStep, 0)
+        JumpAwaitingStep := false
+        JumpStepRetries += 1
+        if (JumpStepRetries <= 1) {
+            SetTimer(StepWorkspaceJump, -1)
+        } else {
+            FinishWorkspaceJump()
+        }
     }
 }
 
 /**
- * FinishWorkspaceJump() - Completes a direct jump and clears jump state.
- *
- * Ensures logical LWin is released if still held when the target is reached.
+ * FinishWorkspaceJump() - Stops jump timers, resets jump state, and releases LWin.
  */
 FinishWorkspaceJump() {
-    global IsWorkspaceJumping
+    global IsWorkspaceJumping, JumpAwaitingStep, JumpPrevGuid, JumpStepRetries
 
+    SetTimer(StepWorkspaceJump, 0)
+    SetTimer(PollWorkspaceJumpStep, 0)
     IsWorkspaceJumping := false
+    JumpAwaitingStep := false
+    JumpPrevGuid := ""
+    JumpStepRetries := 0
     if (GetKeyState("LWin")) {
         Send("{Blind}{vkE8}{LWin up}")
     }
